@@ -1,0 +1,10 @@
+
+.mathjax-refresh-cover {
+	opacity: 1;
+	transition: opacity 60ms linear;
+}
+
+.mathjax-toolkit-bidi-math,
+.mathjax-toolkit-bidi-text {
+	unicode-bidi: isolate;
+}

@@ -1,0 +1,10 @@
+{
+	"id": "obsidian-mathjax-toolkit",
+	"name": "Obsidian MathJax Toolkit",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Adds support for a custom MathJax preamble, additional MathJax extensions, and bidirectional (RTL/LTR) text in mathematical expressions for writing Hebrew, Arabic, and other right-to-left languages.",
+	"author": "Moshe Weinstock",
+	"authorUrl": "https://github.com/kalmanmoshe/",
+	"isDesktopOnly": false
+}
