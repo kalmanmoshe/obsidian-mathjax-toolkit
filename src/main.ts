@@ -2,6 +2,8 @@ import { Plugin, Notice, MarkdownView, loadMathJax } from 'obsidian';
 import { MathjaxToolkitPluginSettingTab, DEFAULT_SETTINGS, MathjaxToolkitPluginSettings } from './settings';
 import { processPreamble } from './processPreamble';
 import { MathJaxBidiPatcher, MathJaxEngine } from './mathjaxBidi';
+import { registerFixMathCommand } from './fixMath/fixMathCommand';
+import { loadCommandMappings } from './fixMath/normalizeLatexCommands';
 
 export default class MathjaxToolkitPlugin extends Plugin {
     settings: MathjaxToolkitPluginSettings = { ...DEFAULT_SETTINGS };
@@ -12,6 +14,7 @@ export default class MathjaxToolkitPlugin extends Plugin {
     async onload(): Promise<void> {
         await this.loadSettings();
         this.addSettingTab(new MathjaxToolkitPluginSettingTab(this));
+        registerFixMathCommand(this, () => this.settings.commandMappings);
         this.app.workspace.onLayoutReady(() => {
             void this.configMathJax();
         });
@@ -77,6 +80,9 @@ export default class MathjaxToolkitPlugin extends Plugin {
     private async loadSettings(): Promise<void> {
         const data: unknown = await this.loadData();
         this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+        this.settings.commandMappings = loadCommandMappings(
+            data && typeof data === 'object' && 'commandMappings' in data ? data.commandMappings : undefined,
+        );
     }
 
     async saveSettings(didMathjaxFileLocationChange = false): Promise<void> {

@@ -1,0 +1,483 @@
+/*!
+ * Adapted from Fix Math for Obsidian by Vladislav Sorokin (MIT).
+ * https://github.com/loglux/fix-math-for-obsidian
+ * Copyright (c) 2025 Vladislav Sorokin
+ * Full license: THIRD_PARTY_NOTICES.md
+ * MIT License
+ * 
+ * Copyright (c) 2025 Vladislav Sorokin
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ * Protection of Markdown/code/existing math is provided by fixMath.ts.
+ */
+
+export interface ConversionStats {
+    inlineCount: number;
+    blockCount: number;
+}
+
+export function convertMath(text: string, stats: ConversionStats): string {
+    // 1) Convert quoted block formulae:
+    //
+    // > \[
+    // >  ...
+    // > \]
+    //
+    // into:
+    // > $$ ... $$
+    text = text.replace(
+        /^>[ \t]*\\\[[ \t]*\r?\n([\s\S]*?)\r?\n>[ \t]*\\\][ \t]*$/gm,
+        (_match: string, inner: string) => {
+            const cleaned = inner
+                .split(/\r?\n/)
+                .map((line: string) => line.replace(/^>[ \t]*/, "")) // strip ">" from each inner line
+                .join(" ");
+            stats.blockCount++;
+            return `> $$ ${cleaned.trim()} $$`;
+        }
+    );
+
+    // 1.6) Strip ChatGPT heading artifact before math block openers:
+    //
+    // # [          →  [
+    // content          content
+    // ]                ]
+    //
+    // ChatGPT sometimes exports display math with "# [" on its own line.
+    // Remove the "#" so the existing bracketBlockRe handles it normally.
+    text = text.replace(/^#[ \t]*(\[[ \t]*)$/gm, (_m, bracket: string) => bracket);
+
+    // 1.7) Strip "#" from LaTeX commands at line start (ChatGPT artifact):
+    // "# \begin{pmatrix}" → "\begin{pmatrix}"
+    text = text.replace(/^#[ \t]*(\\begin\{)/gm, '$1');
+
+    // 2) \[ ... \]  → $$ ... $$
+    const displayBackslashRe = /(^|[^\\])\\\[((?:[\s\S]*?))\\\]/g;
+
+    // 3) Multiline [ ... ] blocks → $$ ... $$ (only when it looks like maths)
+    //    Uses depth-counting to find the matching ] so nested ] inside the block
+    //    (e.g. \mathbf{1}[condition]) don't prematurely close the outer block.
+
+    // 4) Single-line [ ... ] blocks → $$ ... $$ (only when it looks like maths)
+    //    Examples: [ \frac{a}{b}(c + d) = ... ]
+    //    Must not be Markdown links like [text](url) or [[wikilinks]]
+    const hasLaTeXCommand = (s: string) => /\\[a-zA-Z]+/.test(s);
+
+    // 5) \( ... \)  → $ ... $ (backslashed inline maths)
+    const inlineBackslashRe = /(^|[^\\])\\\((.+?)\\\)/g;
+
+    // Heuristic: treat content as maths if it contains:
+    //  - LaTeX markers (\ , _ , ^ , \text{...})
+    //  - or obvious maths Unicode symbols (→, ∞, ±, ≥, ≤)
+    //  - or, if ASCII-ish, a digit AND a maths operator (+-*/=)
+    //  - or simple variable equations like x=y, a<b
+    // strict=true is used for [ ... ] bracket blocks (display math markers).
+    // In strict mode, borderline heuristics are disabled: a pure number like [1]
+    // is a footnote reference, a single letter like [n] is a label, and an
+    // uppercase sequence like [RL] is an abbreviation — none are display math.
+    // These patterns DO make sense for plain parentheses (geometry notation).
+    const isMathy = (s: string, strict = false) => {
+        // Hebrew and other uncased scripts are not matched by \p{Ll}.
+        // Without an explicit LaTeX command, preserve prose even with numbers.
+        if (!/\\[A-Za-z]+/.test(s) &&
+            (/\p{Ll}{3,}/u.test(s) || /\p{L}{2,}/u.test(s.replace(/[A-Za-z]/g, '')))) {
+            return false;
+        }
+        // Explicit mathematical markers: LaTeX commands, subscripts/superscripts, arrows, ∞, ±, ≥, ≤
+        if (/[\\_^→∞±≥≤]|\\text\{/.test(s)) {
+            return true;
+        }
+
+        // LaTeX number formatting like 123{,}456 or 1{.}234 (used for thousands separators)
+        if (/\d+\{[,.\s]\}\d+/.test(s)) {
+            return true;
+        }
+
+        const hasDigit = /\d/.test(s);
+        const hasOp = /[+\-*/=<>,]/.test(s);
+
+        // Classic case: there are digits AND operators present
+        if (hasDigit && hasOp) {
+            return true;
+        }
+
+        if (!strict) {
+            // A pure number (possibly with a minus sign and/or a decimal part) also counts as maths.
+            // Disabled in strict mode: [1], [42] are footnote references, not display math.
+            if (/^\s*-?\d+(?:\.\d+)?\s*$/.test(s)) {
+                return true;
+            }
+
+            // Single-letter variables or uppercase geometry notation: (p), (x'), (DEM), (EM)
+            // Disabled in strict mode: [n] is a label, [RL] is an abbreviation.
+            if (/^[a-zA-Z](?:'+)?$/.test(s.trim())) {
+                return true;
+            }
+            if (/^[A-Z]{2,}(?:'+)?$/.test(s.trim())) {
+                return true;
+            }
+        }
+
+        // Simple variable equations without digits
+        // Examples: "x=y", "a<b", "f>g", "x = y + z"
+        // Match single letters with operators between them
+        if (/^[a-zA-Z]\s*[=<>+\-*/]\s*[a-zA-Z]/.test(s)) {
+            return true;
+        }
+
+        // Algebraic expressions with variables and operators (but not prose)
+        // Examples: "n(k-n)", "a+b", "x*y", "2n+k"
+        const hasLetters = /[a-zA-Z]/.test(s);
+        const hasWords = /\b[a-zA-Z]{2,}\b/.test(s);
+        if (hasLetters && hasOp && !hasWords) {
+            return true;
+        }
+
+        return false;
+    };
+
+
+    // Keep every line in the blockquote, and leave non-math quotes unchanged.
+    text = text.replace(
+        /^>[ \t]*\[[ \t]*\n((?:>[ \t]*[^\n]*\n)*?)>[ \t]*\][ \t]*$/gm,
+        (match: string, inner: string) => {
+            const cleaned = inner.split('\n').map((line) => line.replace(/^>[ \t]?/, ''))
+                .join('\n').trim();
+            if (!isMathy(cleaned, true)) return match;
+            stats.blockCount++;
+            return '> $$\n' + cleaned.split('\n').map((line) => `> ${line}`).join('\n') + '\n> $$';
+        },
+    );
+
+    // Normalize adjacent \]\[ on the same line: insert newline so each block is matched separately.
+    // Without this, \]\[ leaves the second \[ preceded by \ which blocks the regex.
+    text = text.replace(/\\\][ \t]*\\\[/g, '\\]\n\\[');
+    // Separate adjacent inline spans so conversion cannot create an accidental $$.
+    text = text.replace(/\\\)\\\(/g, '\\) \\(');
+
+    // Convert \[ ... \] → $$ ... $$
+    let out = text.replace(displayBackslashRe, (_, pre: string, inner: string) => {
+        stats.blockCount++;
+        return `${pre}$$
+${inner.trim()}
+$$`;
+    });
+
+    // Convert multiline [ ... ] → $$ ... $$ (only if it looks like maths)
+    {
+        const lines = out.split(/\r?\n/);
+        const result: string[] = [];
+        let i = 0;
+        while (i < lines.length) {
+            const line = lines[i]!;
+            const openMatch = line.match(/^([ \t]*(?:[#>\-*+0-9.]+\s*)?)\[[ \t]*$/);
+            if (openMatch) {
+                const prefix = openMatch[1];
+                let depth = 1;
+                let j = i + 1;
+                const innerLines: string[] = [];
+                let found = false;
+                while (j < lines.length) {
+                    const l = lines[j]!;
+                    let closedHere = false;
+                    for (const ch of l) {
+                        if (ch === "[") depth++;
+                        else if (ch === "]") { depth--; if (depth === 0) { closedHere = true; break; } }
+                    }
+                    if (closedHere) {
+                        if (/^[ \t]*\][ \t]*$/.test(l)) found = true;
+                        break;
+                    }
+                    innerLines.push(l);
+                    j++;
+                }
+                if (found) {
+                    const inner = innerLines.join("\n");
+                    if (hasLaTeXCommand(inner) || isMathy(inner, true)) {
+                        stats.blockCount++;
+                        result.push(`${prefix}$$`);
+                        result.push(inner.trim());
+                        result.push("$$");
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+            result.push(line);
+            i++;
+        }
+        out = result.join("\n");
+    }
+
+    // Apply single-line [ ... ] handlers only to text OUTSIDE existing $$ blocks.
+    // This prevents converting brackets that are already inside a $$ block
+    // (e.g. \mathbf{X}=[\mathbf{1}\ \mathbf{S}] inside a multiline $$ block).
+    {
+        const bracketParts = out.split(/(\$\$[\s\S]*?\$\$)/);
+        out = bracketParts.map((part: string, idx: number) => {
+            if (idx % 2 === 1) return part; // inside $$ — skip
+
+            // Convert single-line [ ... ] that contain \left[ ... \right] → $$ ... $$
+            // This avoids breaking on the inner "]" from \right].
+            let p = part.replace(
+                /\[\s*\\left\[[^\n]*?\\right\][^\n]*?\]/g,
+                (match: string, offset: number, fullText: string) => {
+                    const before = fullText.slice(0, offset);
+                    const afterBracket = fullText[offset + match.length];
+                    if (afterBracket === "(" || afterBracket === ":") return match;
+                    if (match.startsWith("[[")) return match;
+                    const inner = match.slice(1, -1);
+                    if (inner.startsWith("^")) return match;
+                    // Skip if inside a \( ... \) inline math span
+                    const openInline = (before.match(/\\\(/g) || []).length;
+                    const closeInline = (before.match(/\\\)/g) || []).length;
+                    if (openInline > closeInline) return match;
+                    // Skip if inside an existing $ ... $ inline math span
+                    const singleDollars = (before.match(/(?<!\$)\$(?!\$)/g) || []).length;
+                    if (singleDollars % 2 === 1) return match;
+                    stats.blockCount++;
+                    return `$$\n${inner.trim()}\n$$`;
+                }
+            );
+
+            // Convert single-line [ ... ] → $$ ... $$ (only if it looks like maths)
+            // Must avoid Markdown links, wikilinks, footnotes.
+            //
+            // Key heuristic: ChatGPT display math always has a space after "[": [ formula ]
+            // Brackets without leading space — [citation], [abbrev], [ref] — are text, not math.
+            p = p.replace(
+                /\[([^\]]+)\]/g,
+                (match: string, inner: string, offset: number, fullText: string) => {
+                    const before = fullText.slice(0, offset);
+                    const afterBracket = fullText[offset + match.length];
+                    if (afterBracket === '(' || afterBracket === ':') return match;
+                    if (/\\left\s*$/.test(before) || /\\right/.test(inner) || /\\left/.test(inner)) return match;
+                    if (match.startsWith('[[')) return match;
+                    if (inner.startsWith('^')) return match;
+                    // No leading space → treat as text (citation, abbreviation, reference)
+                    if (!/^\s/.test(inner)) return match;
+                    // Pure numeric lists like [ 11, 46 ] are citation references, not math
+                    if (/^\s*\d+(?:\s*,\s*\d+)*\s*$/.test(inner)) return match;
+                    // Pure letter lists like [ a, b ] are interval/set notation, not display blocks
+                    if (/^\s*[a-zA-Z](?:\s*,\s*[a-zA-Z])*\s*$/.test(inner)) return match;
+                    // Skip if inside a \( ... \) inline math span
+                    const openInline = (before.match(/\\\(/g) || []).length;
+                    const closeInline = (before.match(/\\\)/g) || []).length;
+                    if (openInline > closeInline) return match;
+                    // Skip if inside an existing $ ... $ inline math span
+                    const singleDollars = (before.match(/(?<!\$)\$(?!\$)/g) || []).length;
+                    if (singleDollars % 2 === 1) return match;
+                    if (hasLaTeXCommand(inner) || isMathy(inner, true)) {
+                        stats.blockCount++;
+                        return `$$\n${inner.trim()}\n$$`;
+                    }
+                    return match;
+                }
+            );
+
+            return p;
+        }).join("");
+    }
+
+    // Fix malformed content inside $$ blocks from ChatGPT exports:
+    //   - trailing "\" at end of line → "\\" (broken matrix row separators)
+    //   - "\" before digit or minus → "\\" (compact column vectors)
+    //   - "====..." on its own line → "=" (setext-heading artifact for "=")
+    //   - "## formula" at line start → "formula\n-"
+    //     ChatGPT marks terms followed by subtraction with "##".
+    //     Remove the prefix and append "-" on the next line.
+    //   - "+,formula" or "-,formula" → "+formula" / "-formula"
+    //     ChatGPT uses comma after sign as separator artifact.
+    //   - unescaped "#" → "\#"
+    //     ChatGPT uses "#" to mean "number of" (e.g. "# Yes"), which must be
+    //     escaped in MathJax. Applied after heading cleanup so "## formula"
+    //     artifacts are handled first.
+    out = out.replace(/\$\$([\s\S]*?)\$\$/g, (block: string) =>
+        block
+            .replace(/(?<!\\)\\[ \t]*$/gm, "\\\\")
+            .replace(/(?<!\\)\\(?=[0-9-])/g, "\\\\")
+            .replace(/^={3,}$/gm, "=")
+            .replace(/^-{3,}$/gm, "-")
+            .replace(/^#{1,6}[ \t]+(.*)/gm, "$1\n-")
+            .replace(/^([+-]),/gm, "$1")
+            .replace(/(?<!\\)#/g, "\\#")
+    );
+
+    // At this point, all block maths are in $$ ... $$.
+    // We must NOT touch anything inside $$ ... $$ with inline rules.
+    const parts = out.split(/(\$\$[\s\S]*?\$\$)/);
+    out = parts
+        .map((part, idx) => {
+            // Odd indices (captured group) are the $$...$$ blocks themselves.
+            if (idx % 2 === 1 && part.startsWith("$$")) {
+                return part; // leave block maths as-is
+            }
+
+            // 1) Convert plain ( ... ) → $ ... $ when it looks like maths
+            let chunk = convertPlainParens(part, isMathy, stats);
+
+            // 2) Convert \( ... \) → $ ... $
+            chunk = chunk.replace(
+                inlineBackslashRe,
+                (_, pre: string, inner: string) => {
+                    stats.inlineCount++;
+                    return `${pre}$${inner.trim()}$`;
+                }
+            );
+
+            return chunk;
+        })
+        .join("");
+
+        return out;
+}
+
+/**
+ * Convert plain parentheses used as inline maths delimiters:
+ * ( ... ) → $ ... $ (only if content "looks like maths").
+ *
+ * Behaviour:
+ *  - "(x\\to 1)"          → "$x\\to 1$"
+ *  - "(0/0)"              → "$0/0$"
+ *  - "(3x^{2}-3 = 0)"     → "$3x^{2}-3 = 0$"
+ *  - "((3x^{2}-3)' = 6x)" → "$((3x^{2}-3)' = 6x)$"
+ *  - "(про (3x^{2}-3) в числителе)" → "(про $3x^{2}-3$ в числителе)"
+ */
+function convertPlainParens(text: string, isMathy: (s: string) => boolean, stats: ConversionStats): string {
+    let result = "";
+    let i = 0;
+
+    const isWhitespace = (ch: string) => /\s/.test(ch);
+
+    while (i < text.length) {
+        const ch = text[i];
+
+        // Skip \( ... \) spans — leave them for the backslash inline handler
+        if (ch === "\\" && i + 1 < text.length && text[i + 1] === "(") {
+            const end = text.indexOf("\\)", i + 2);
+            if (end !== -1) {
+                result += text.slice(i, end + 2);
+                i = end + 2;
+            } else {
+                result += ch;
+                i += 1;
+            }
+            continue;
+        }
+
+        if (ch === "(") {
+            const prev = i === 0 ? "" : text[i - 1]!;
+
+            // Require start-of-line, whitespace, or another "(" before "("
+            if (i > 0 && !isWhitespace(prev) && !"(，。！？；：、,;:!?".includes(prev)) {
+                result += ch;
+                i += 1;
+                continue;
+            }
+
+            // Find matching closing parenthesis with a simple depth counter
+            let depth = 1;
+            let j = i + 1;
+
+            while (j < text.length && depth > 0) {
+                const c = text[j];
+                if (c === "(") depth += 1;
+                else if (c === ")") depth -= 1;
+                j += 1;
+            }
+
+            if (depth !== 0) {
+                // No matching closing parenthesis, treat "(" as normal text
+                result += ch;
+                i += 1;
+                continue;
+            }
+
+            const closeIndex = j - 1;
+            const inner = text.slice(i + 1, closeIndex);
+
+            // If inner already contains explicit LaTeX inline delimiters,
+            // treat the outer parentheses as plain text and let those
+            // inner expressions be handled separately.
+            if (/\\\(/.test(inner) || /\\\)/.test(inner)) {
+                result += ch;
+                i += 1;
+                continue;
+            }
+
+            // Collect trailing primes: ( ... )', ( ... )'', etc.
+            let k = closeIndex + 1;
+            let primes = "";
+            while (k < text.length && text[k] === "'") {
+                primes += "'";
+                k += 1;
+            }
+
+            const after = k < text.length ? text[k]! : "";
+            // Korean grammatical particles (은/는, 이/가, 을/를, 와/과, 의, etc.)
+            // attach directly to the preceding expression without a space.
+            const koreanParticleRe = /^(?:으로|에서|에게|까지|부터|처럼|보다|마다|이나|이라|은|는|이|가|을|를|와|과|의|에|께|도|만|로|나|라)/;
+            const afterIsDelim =
+                after === "" ||
+                isWhitespace(after) ||
+                ").,;:?!*_，。！？；：、".includes(after) ||
+                koreanParticleRe.test(text.slice(k));
+
+            // If it does not look like a delimiter, treat "(" as normal and move on.
+            if (!afterIsDelim) {
+                result += ch;
+                i += 1;
+                continue;
+            }
+
+            // Ignore LaTeX commands like \to, \sin, \cos when checking for "words"
+            const innerWithoutCommands = inner.replace(/\\[A-Za-z]+/g, "");
+            const hasLaTeXCommand = /\\[a-zA-Z]+/.test(inner);
+
+            // Check for natural language: look for words with 3+ consecutive LOWERCASE letters.
+            // Uppercase-only sequences like (DEM), (EM) are geometry/math notation, not prose.
+            // Skip this check if LaTeX commands are present — e.g. (\angle DEM=40^\circ) should convert.
+            if (!hasLaTeXCommand && /\p{Ll}{3,}/u.test(innerWithoutCommands)) {
+                result += ch;
+                i += 1;
+                continue;
+            }
+
+            // If content does not look like maths at all, do NOT jump over it:
+            // just output "(" and continue scanning inside for inner (...) blocks.
+            if (!isMathy(inner)) {
+                result += ch;
+                i += 1;
+                continue;
+            }
+
+            // This is maths: remove outer parentheses and wrap content in $...$
+            stats.inlineCount++;
+            const core = primes ? `(${inner.trim()})${primes}` : inner.trim();
+            result += `$${core}$`;
+            i = k;
+        } else {
+            result += ch;
+            i += 1;
+        }
+    }
+
+    return result;
+}
+
